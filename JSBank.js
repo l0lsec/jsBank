@@ -21,6 +21,7 @@
   • findAllForms()              - Find all forms on page
   • findHiddenFields()          - Find hidden form fields
   • findDataAttributes()        - Find data attributes
+  • scanSensitiveData()         - Scan DOM/storage/logs for secrets
 
 🎯 XSS TESTING:
   • testXSSInputs()             - Test inputs with XSS payloads
@@ -32,10 +33,17 @@
   • inspectCookies()            - Analyze cookie security
   • findJWTTokens()             - Find and decode JWT tokens
   • decodeJWT(token)            - Decode specific JWT token
+  • analyzeCSRFProtection()     - Score forms for CSRF defenses
+  • replayFormWithoutCSRF()     - Replay forms with tokens removed
+  • jwtLab.*                    - JWT tampering & replay helpers
 
 📊 MONITORING:
   • showRequestLog()            - View intercepted requests
   • showFormLog()               - View form submissions
+  • showRealtimeLog()           - View WebSocket/EventSource activity
+  • listRealtimeChannels()      - List realtime channels and IDs
+  • injectWebSocketMessage()    - Inject frames into captured sockets
+  • closeRealtimeChannel()      - Close WebSocket/EventSource handles
   • inspectStorage()            - Check localStorage/sessionStorage
   • findEventListeners()        - Find event listeners
 
@@ -2143,6 +2151,95 @@ inspectVariables();
     
     let requestLog = [];
     let formLog = [];
+    const realtimeLog = [];
+    const realtimeChannels = new Map();
+    let realtimeChannelCounter = 0;
+    
+    /**
+     * Convert various header inputs (object, array, Headers) into a plain object
+     */
+    function normalizeHeaders(candidate) {
+        if (!candidate) {
+            return {};
+        }
+        
+        if (candidate instanceof Headers) {
+            const normalized = {};
+            candidate.forEach((value, key) => {
+                normalized[key] = value;
+            });
+            return normalized;
+        }
+        
+        if (Array.isArray(candidate)) {
+            return candidate.reduce((acc, [key, value]) => {
+                acc[key] = value;
+                return acc;
+            }, {});
+        }
+        
+        return { ...candidate };
+    }
+    
+    /**
+     * Provide short, safe previews of payloads without breaking binary data
+     */
+    function safePreview(value, maxLength = 200) {
+        if (value == null) {
+            return value;
+        }
+        
+        if (typeof value === 'string') {
+            return value.length > maxLength ? `${value.slice(0, maxLength)}…` : value;
+        }
+        
+        if (value instanceof ArrayBuffer) {
+            return `[ArrayBuffer byteLength=${value.byteLength}]`;
+        }
+        
+        if (window.Blob && value instanceof Blob) {
+            return `[Blob size=${value.size} type=${value.type || 'unknown'}]`;
+        }
+        
+        if (window.FormData && value instanceof FormData) {
+            const summary = {};
+            value.forEach((v, k) => {
+                summary[k] = v;
+            });
+            return summary;
+        }
+        
+        if (typeof value === 'object') {
+            try {
+                const json = JSON.stringify(value);
+                return json.length > maxLength ? `${json.slice(0, maxLength)}…` : json;
+            } catch (e) {
+                return `[object ${value.constructor?.name || 'Object'}]`;
+            }
+        }
+        
+        return String(value);
+    }
+    
+    function pushRealtimeEntry(entry) {
+        realtimeLog.push({
+            timestamp: new Date().toISOString(),
+            ...entry
+        });
+    }
+    
+    function nextRealtimeChannelId(type) {
+        return `${type}-${++realtimeChannelCounter}`;
+    }
+    
+    function registerRealtimeChannel(meta) {
+        realtimeChannels.set(meta.id, meta);
+        return meta;
+    }
+    
+    function removeRealtimeChannel(id) {
+        realtimeChannels.delete(id);
+    }
     
     /**
      * Intercept fetch requests
@@ -2151,19 +2248,51 @@ inspectVariables();
     window.fetch = function(...args) {
         const [resource, config] = args;
         
+        let url = '';
+        let method = 'GET';
+        let headers = {};
+        let body = null;
+        let note = null;
+        
+        if (resource instanceof Request) {
+            url = resource.url;
+            method = resource.method || method;
+            headers = normalizeHeaders(resource.headers);
+            body = '[Request body stream - clone required]';
+        } else if (typeof resource === 'string') {
+            url = resource;
+        } else if (resource && typeof resource === 'object' && 'url' in resource) {
+            url = resource.url.toString();
+        } else {
+            url = String(resource);
+        }
+        
+        if (config) {
+            method = config.method || method;
+            const normalizedHeaders = normalizeHeaders(config.headers);
+            if (Object.keys(normalizedHeaders).length > 0) {
+                headers = normalizedHeaders;
+            }
+            if (config.body !== undefined) {
+                body = config.body;
+            }
+            note = config.note || null;
+        }
+        
         const logEntry = {
             timestamp: new Date().toISOString(),
-            method: config?.method || 'GET',
-            url: resource,
-            headers: config?.headers || {},
-            body: config?.body || null,
+            method,
+            url,
+            headers,
+            body,
+            note,
         };
         
         requestLog.push(logEntry);
         
         console.log('📤 Fetch Request:', logEntry.method, logEntry.url);
         if (logEntry.body) {
-            console.log('Body:', logEntry.body);
+            console.log('Body preview:', safePreview(logEntry.body));
         }
         
         return originalFetch.apply(this, args)
@@ -2202,6 +2331,123 @@ inspectVariables();
     };
     
     /**
+     * Monitor WebSocket traffic
+     */
+    if (window.WebSocket) {
+        const OriginalWebSocket = window.WebSocket;
+        window.WebSocket = function(url, protocols) {
+            const wsInstance = protocols !== undefined
+                ? new OriginalWebSocket(url, protocols)
+                : new OriginalWebSocket(url);
+            
+            const id = nextRealtimeChannelId('ws');
+            const meta = registerRealtimeChannel({
+                id,
+                type: 'WebSocket',
+                url: typeof url === 'string' ? url : url?.toString?.() || '',
+                protocols: Array.isArray(protocols) ? protocols : (protocols ? [protocols] : []),
+                createdAt: new Date().toISOString(),
+                instance: wsInstance
+            });
+            
+            pushRealtimeEntry({ type: 'WebSocket', direction: 'OPEN', id, url: meta.url });
+            
+            const originalSend = wsInstance.send;
+            wsInstance.send = function(data) {
+                pushRealtimeEntry({
+                    type: 'WebSocket',
+                    direction: 'OUTBOUND',
+                    id,
+                    data: safePreview(data)
+                });
+                return originalSend.call(this, data);
+            };
+            
+            wsInstance.addEventListener('message', event => {
+                pushRealtimeEntry({
+                    type: 'WebSocket',
+                    direction: 'INBOUND',
+                    id,
+                    data: safePreview(event.data)
+                });
+            });
+            
+            wsInstance.addEventListener('close', event => {
+                pushRealtimeEntry({
+                    type: 'WebSocket',
+                    direction: 'CLOSED',
+                    id,
+                    code: event.code,
+                    reason: event.reason || '',
+                    wasClean: event.wasClean
+                });
+                removeRealtimeChannel(id);
+            });
+            
+            wsInstance.addEventListener('error', () => {
+                pushRealtimeEntry({
+                    type: 'WebSocket',
+                    direction: 'ERROR',
+                    id
+                });
+            });
+            
+            return wsInstance;
+        };
+        window.WebSocket.prototype = OriginalWebSocket.prototype;
+    }
+    
+    /**
+     * Monitor EventSource / Server Sent Events
+     */
+    if (window.EventSource) {
+        const OriginalEventSource = window.EventSource;
+        window.EventSource = function(url, config) {
+            const esInstance = new OriginalEventSource(url, config);
+            const id = nextRealtimeChannelId('es');
+            const meta = registerRealtimeChannel({
+                id,
+                type: 'EventSource',
+                url: typeof url === 'string' ? url : url?.toString?.() || '',
+                withCredentials: config?.withCredentials || false,
+                createdAt: new Date().toISOString(),
+                instance: esInstance
+            });
+            
+            pushRealtimeEntry({ type: 'EventSource', direction: 'OPEN', id, url: meta.url });
+            
+            esInstance.addEventListener('message', event => {
+                pushRealtimeEntry({
+                    type: 'EventSource',
+                    direction: 'INBOUND',
+                    id,
+                    data: safePreview(event.data)
+                });
+            });
+            
+            esInstance.addEventListener('error', event => {
+                pushRealtimeEntry({
+                    type: 'EventSource',
+                    direction: 'ERROR',
+                    id,
+                    data: event?.data || null
+                });
+            });
+            
+            esInstance.addEventListener('open', () => {
+                pushRealtimeEntry({
+                    type: 'EventSource',
+                    direction: 'READY',
+                    id
+                });
+            });
+            
+            return esInstance;
+        };
+        window.EventSource.prototype = OriginalEventSource.prototype;
+    }
+    
+    /**
      * Monitor form submissions
      */
     document.addEventListener('submit', function(e) {
@@ -2232,11 +2478,18 @@ inspectVariables();
     /**
      * View logged requests
      */
-    window.showRequestLog = function() {
+    window.showRequestLog = function(filter = {}) {
+        const { method, urlIncludes } = filter;
+        const rows = requestLog.filter(entry => {
+            const methodMatch = method ? entry.method === method : true;
+            const urlMatch = urlIncludes ? entry.url.includes(urlIncludes) : true;
+            return methodMatch && urlMatch;
+        });
+        
         console.group('📊 Request Log');
-        console.table(requestLog);
+        console.table(rows);
         console.groupEnd();
-        return requestLog;
+        return rows;
     };
     
     /**
@@ -2250,12 +2503,99 @@ inspectVariables();
     };
     
     /**
+     * View realtime channel log
+     */
+    window.showRealtimeLog = function(filters = {}) {
+        const { type, direction, id, urlIncludes } = filters;
+        const rows = realtimeLog.filter(entry => {
+            const typeMatch = type ? entry.type === type : true;
+            const directionMatch = direction ? entry.direction === direction : true;
+            const idMatch = id ? entry.id === id : true;
+            const urlMatch = urlIncludes ? (entry.url || '').includes(urlIncludes) : true;
+            return typeMatch && directionMatch && idMatch && urlMatch;
+        });
+        
+        console.group('📡 Realtime Channel Log');
+        console.table(rows);
+        console.groupEnd();
+        return rows;
+    };
+    
+    window.listRealtimeChannels = function() {
+        const channels = Array.from(realtimeChannels.values()).map(meta => ({
+            id: meta.id,
+            type: meta.type,
+            url: meta.url,
+            protocols: (meta.protocols || []).join(', ') || '—',
+            openedAt: meta.createdAt,
+            readyState: meta.instance?.readyState
+        }));
+        
+        console.group('📡 Active Realtime Channels');
+        console.table(channels);
+        console.groupEnd();
+        return channels;
+    };
+    
+    window.injectWebSocketMessage = function(channelId, payload) {
+        const meta = realtimeChannels.get(channelId);
+        if (!meta || meta.type !== 'WebSocket') {
+            console.warn(`No WebSocket channel found for id "${channelId}"`);
+            return false;
+        }
+        
+        try {
+            meta.instance.send(payload);
+            pushRealtimeEntry({
+                type: 'WebSocket',
+                direction: 'OUTBOUND_INJECTED',
+                id: channelId,
+                data: safePreview(payload)
+            });
+            console.log(`✅ Injected payload into WebSocket ${channelId}`);
+            return true;
+        } catch (error) {
+            console.error('Failed to inject WebSocket payload:', error);
+            return false;
+        }
+    };
+    
+    window.closeRealtimeChannel = function(channelId, code = 1000, reason = '') {
+        const meta = realtimeChannels.get(channelId);
+        if (!meta) {
+            console.warn(`No realtime channel found for id "${channelId}"`);
+            return false;
+        }
+        
+        try {
+            if (meta.type === 'WebSocket') {
+                meta.instance.close(code, reason);
+            } else if (meta.type === 'EventSource' && typeof meta.instance.close === 'function') {
+                meta.instance.close();
+            }
+            console.log(`✅ Requested close for channel ${channelId}`);
+            return true;
+        } catch (error) {
+            console.error('Failed to close realtime channel:', error);
+            return false;
+        }
+    };
+    
+    window.clearRealtimeLog = function() {
+        realtimeLog.length = 0;
+        console.log('✅ Realtime log cleared');
+    };
+    
+    /**
      * Clear logs
      */
-    window.clearLogs = function() {
-        requestLog = [];
-        formLog = [];
-        console.log('✅ Logs cleared');
+    window.clearLogs = function(options = {}) {
+        requestLog.length = 0;
+        formLog.length = 0;
+        if (options.includeRealtime) {
+            realtimeLog.length = 0;
+        }
+        console.log('✅ Request/Form logs cleared');
     };
     
     /**
@@ -2288,8 +2628,220 @@ inspectVariables();
         return forms;
     };
     
-    console.log('✅ Request & Form Logger loaded!');
-    console.log('Commands: showRequestLog(), showFormLog(), findAllForms(), clearLogs()');
+    const DEFAULT_TOKEN_PATTERN = /(csrf|xsrf|token|authenticity|requestverification|anti\-forgery)/i;
+    
+    window.analyzeCSRFProtection = function(options = {}) {
+        const tokenPattern = options.tokenPattern || DEFAULT_TOKEN_PATTERN;
+        const forms = Array.from(document.querySelectorAll('form'));
+        const report = forms.map((form, index) => {
+            const method = (form.method || 'GET').toUpperCase();
+            const action = form.action || window.location.href;
+            const hiddenFields = Array.from(form.querySelectorAll('input[type="hidden"]'));
+            const suspectedTokens = hiddenFields.filter(input => tokenPattern.test(input.name || ''));
+            const sameOrigin = (() => {
+                try {
+                    const actionUrl = new URL(action, window.location.href);
+                    return actionUrl.origin === window.location.origin;
+                } catch (e) {
+                    return true;
+                }
+            })();
+            
+            const assessment = suspectedTokens.length > 0 && method !== 'GET'
+                ? 'Likely Protected'
+                : 'Needs Review';
+            
+            return {
+                index,
+                action,
+                method,
+                sameOrigin,
+                suspectedTokens: suspectedTokens.map(input => ({
+                    name: input.name,
+                    valuePreview: safePreview(input.value, 50)
+                })),
+                assessment
+            };
+        });
+        
+        console.group('🛡️ CSRF Protection Analysis');
+        if (report.length === 0) {
+            console.log('No forms detected');
+        } else {
+            report.forEach(item => {
+                console.groupCollapsed(`Form ${item.index + 1}: ${item.assessment}`);
+                console.log('Action:', item.action);
+                console.log('Method:', item.method);
+                console.log('Same Origin:', item.sameOrigin);
+                console.log('Suspected Tokens:', item.suspectedTokens);
+                console.groupEnd();
+            });
+        }
+        console.groupEnd();
+        
+        return report;
+    };
+    
+    window.replayFormWithoutCSRF = async function(formIndex, options = {}) {
+        const forms = document.querySelectorAll('form');
+        const form = forms[formIndex];
+        if (!form) {
+            console.error(`Form at index ${formIndex} was not found`);
+            return null;
+        }
+        
+        const tokenPattern = options.tokenPattern || DEFAULT_TOKEN_PATTERN;
+        const overrides = options.overrides || {};
+        const keepTokens = options.keepTokens || false;
+        const method = (options.method || form.method || 'GET').toUpperCase();
+        const action = options.action || form.action || window.location.href;
+        const formData = new FormData(form);
+        const params = new URLSearchParams();
+        const removedTokens = [];
+        
+        formData.forEach((value, key) => {
+            const shouldDrop = !keepTokens && tokenPattern.test(key);
+            if (shouldDrop) {
+                removedTokens.push(key);
+                return;
+            }
+            
+            const overrideValue = Object.prototype.hasOwnProperty.call(overrides, key)
+                ? overrides[key]
+                : value;
+            params.append(key, overrideValue);
+        });
+        
+        Object.entries(overrides).forEach(([key, value]) => {
+            if (!formData.has(key)) {
+                params.append(key, value);
+            }
+        });
+        
+        const targetUrl = new URL(action, window.location.href);
+        const requestInit = {
+            method,
+            headers: options.headers ? normalizeHeaders(options.headers) : undefined,
+            credentials: options.credentials || 'include'
+        };
+        
+        if (method === 'GET') {
+            params.forEach((value, key) => targetUrl.searchParams.set(key, value));
+        } else {
+            const bodyString = params.toString();
+            requestInit.headers = {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                ...(requestInit.headers || {})
+            };
+            requestInit.body = bodyString;
+        }
+        
+        console.group('🔁 CSRF Replay Attempt');
+        console.log('Form Index:', formIndex);
+        console.log('Target:', targetUrl.href);
+        console.log('Method:', method);
+        console.log('Removed Tokens:', removedTokens);
+        console.log('Overrides:', overrides);
+        console.groupEnd();
+        
+        try {
+            const response = await fetch(targetUrl.href, requestInit);
+            console.log('Replay status:', response.status);
+            return response;
+        } catch (error) {
+            console.error('Replay failed:', error);
+            throw error;
+        }
+    };
+    
+    const defaultSensitivePatterns = [
+        { name: 'Email Address', regex: /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, severity: 'low' },
+        { name: 'AWS Access Key', regex: /\bAKIA[0-9A-Z]{16}\b/g, severity: 'high' },
+        { name: 'AWS Secret Key', regex: /\b(?<![A-Z0-9])[A-Za-z0-9/+=]{40}(?![A-Z0-9])\b/g, severity: 'high' },
+        { name: 'Google API Key', regex: /\bAIza[0-9A-Za-z\-_]{35}\b/g, severity: 'medium' },
+        { name: 'Bearer Token', regex: /Bearer\s+[A-Za-z0-9\-._~+/]+=*/gi, severity: 'high' },
+        { name: 'Private IPv4', regex: /\b(?:10|127|172\.(?:1[6-9]|2\d|3[0-1])|192\.168)\.\d{1,3}\.\d{1,3}\b/g, severity: 'medium' },
+        { name: 'Password Keyword', regex: /(password|passwd|secret|pwd|passwrd)["'\s:=]+[^&\s]{4,}/gi, severity: 'medium' },
+        { name: 'JWT-like String', regex: /\b[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\b/g, severity: 'medium' }
+    ];
+    
+    window.scanSensitiveData = function(options = {}) {
+        const patterns = options.patterns || defaultSensitivePatterns;
+        const customPatterns = options.customPatterns || [];
+        const allPatterns = patterns.concat(customPatterns);
+        const matches = [];
+        
+        const sources = [
+            { label: 'DOM Text', data: document.body ? document.body.innerText : '' },
+            { label: 'Inline Scripts', data: Array.from(document.scripts).map(script => script.textContent).join('\n') },
+            { label: 'localStorage', data: (() => {
+                const snapshot = {};
+                for (let i = 0; i < localStorage.length; i++) {
+                    const key = localStorage.key(i);
+                    snapshot[key] = localStorage.getItem(key);
+                }
+                return JSON.stringify(snapshot);
+            })() },
+            { label: 'sessionStorage', data: (() => {
+                const snapshot = {};
+                for (let i = 0; i < sessionStorage.length; i++) {
+                    const key = sessionStorage.key(i);
+                    snapshot[key] = sessionStorage.getItem(key);
+                }
+                return JSON.stringify(snapshot);
+            })() },
+            { label: 'Request Log', data: JSON.stringify(requestLog) }
+        ];
+        
+        const ensureGlobalRegex = regex => {
+            if (!(regex instanceof RegExp)) {
+                return new RegExp(regex, 'gi');
+            }
+            const flags = regex.flags.includes('g') ? regex.flags : `${regex.flags}g`;
+            return new RegExp(regex.source, flags);
+        };
+        
+        sources.forEach(source => {
+            const text = source.data || '';
+            allPatterns.forEach(pattern => {
+                const regex = ensureGlobalRegex(pattern.regex);
+                let match;
+                while ((match = regex.exec(text)) !== null) {
+                    const value = match[0];
+                    const start = Math.max(0, match.index - 40);
+                    const end = Math.min(text.length, match.index + value.length + 40);
+                    const context = text.slice(start, end);
+                    matches.push({
+                        pattern: pattern.name,
+                        severity: pattern.severity || 'info',
+                        value: value.length > 80 ? `${value.slice(0, 80)}…` : value,
+                        source: source.label,
+                        context: context.replace(/\s+/g, ' ')
+                    });
+                    if (!regex.global) {
+                        break;
+                    }
+                }
+            });
+        });
+        
+        console.group('🔎 Sensitive Data Scan');
+        if (matches.length === 0) {
+            console.log('No obvious sensitive data found');
+        } else {
+            console.table(matches);
+        }
+        console.groupEnd();
+        
+        return matches;
+    };
+    
+    window.__JSBankInternal = window.__JSBankInternal || {};
+    window.__JSBankInternal.getRequestLog = () => requestLog;
+    window.__JSBankInternal.getRealtimeLog = () => realtimeLog;
+    
+    console.log('✅ Request, Form & Realtime Logger loaded!');
+    console.log('Commands: showRequestLog(), showFormLog(), showRealtimeLog(), listRealtimeChannels(), findAllForms(), analyzeCSRFProtection(), replayFormWithoutCSRF(), scanSensitiveData(), clearLogs(), clearRealtimeLog()');
 })();
 
 
@@ -2302,6 +2854,29 @@ inspectVariables();
 (function() {
     'use strict';
     
+    function base64UrlEncode(str) {
+        return btoa(str)
+            .replace(/\+/g, '-')
+            .replace(/\//g, '_')
+            .replace(/=+$/, '');
+    }
+    
+    function base64UrlDecode(str) {
+        let normalized = str.replace(/-/g, '+').replace(/_/g, '/');
+        while (normalized.length % 4 !== 0) {
+            normalized += '=';
+        }
+        return atob(normalized);
+    }
+    
+    function encodeJSON(obj) {
+        return base64UrlEncode(JSON.stringify(obj));
+    }
+    
+    function rebuildToken(header, payload, signature = '') {
+        return `${encodeJSON(header)}.${encodeJSON(payload)}.${signature || ''}`;
+    }
+    
     /**
      * Decode JWT token
      */
@@ -2312,8 +2887,8 @@ inspectVariables();
                 throw new Error('Invalid JWT format');
             }
             
-            const header = JSON.parse(atob(parts[0]));
-            const payload = JSON.parse(atob(parts[1]));
+            const header = JSON.parse(base64UrlDecode(parts[0]));
+            const payload = JSON.parse(base64UrlDecode(parts[1]));
             const signature = parts[2];
             
             return { header, payload, signature };
@@ -2321,6 +2896,10 @@ inspectVariables();
             console.error('Failed to decode JWT:', e);
             return null;
         }
+    }
+    
+    function getRequestLogSnapshot() {
+        return window.__JSBankInternal?.getRequestLog?.() || [];
     }
     
     /**
@@ -2426,6 +3005,102 @@ inspectVariables();
         console.groupEnd();
     };
     
+    const jwtLab = {
+        decode: decodeJWT,
+        
+        forgeNoneVariant(token, overrides = {}) {
+            const decoded = decodeJWT(token);
+            if (!decoded) return null;
+            
+            const header = { ...decoded.header, alg: 'none' };
+            const payload = { ...decoded.payload, ...overrides };
+            const forged = rebuildToken(header, payload, '');
+            console.log('🔧 Forged alg:none token:', forged);
+            return forged;
+        },
+        
+        modifyClaims(token, claimUpdates = {}, options = {}) {
+            const decoded = decodeJWT(token);
+            if (!decoded) return null;
+            
+            const header = { ...decoded.header };
+            const payload = { ...decoded.payload, ...claimUpdates };
+            const signature = options.keepSignature ? decoded.signature : '';
+            const tampered = rebuildToken(header, payload, signature);
+            console.log('✏️  Modified claims token:', tampered);
+            return tampered;
+        },
+        
+        setExpiration(token, newEpochSeconds) {
+            if (typeof newEpochSeconds !== 'number') {
+                console.warn('Expiration must be provided in epoch seconds');
+                return null;
+            }
+            return this.modifyClaims(token, { exp: newEpochSeconds });
+        },
+        
+        async replayRequestWithToken(logIndex, token, options = {}) {
+            const log = getRequestLogSnapshot();
+            const entry = log[logIndex];
+            if (!entry) {
+                console.warn(`Request log entry ${logIndex} not found`);
+                return null;
+            }
+            
+            const headerName = options.headerName || 'Authorization';
+            const prefix = options.prefix === '' ? '' : (options.prefix ?? 'Bearer ');
+            const headers = {
+                ...(entry.headers || {}),
+                [headerName]: `${prefix}${token}`
+            };
+            
+            if (options.additionalHeaders) {
+                Object.assign(headers, options.additionalHeaders);
+            }
+            
+            let body = entry.body;
+            if (options.overrideBody !== undefined) {
+                body = options.overrideBody;
+            } else if (body && typeof body !== 'string' && !(body instanceof URLSearchParams)) {
+                console.warn('Original body is not a plain string. Provide overrideBody to control payload.');
+                body = undefined;
+            }
+            
+            const requestInit = {
+                method: entry.method || 'GET',
+                headers,
+                body,
+                credentials: options.credentials || 'include'
+            };
+            
+            console.group('🔁 JWT Replay');
+            console.log('Log Index:', logIndex);
+            console.log('URL:', entry.url);
+            console.log('Method:', requestInit.method);
+            console.log('Headers:', headers);
+            console.groupEnd();
+            
+            const response = await fetch(entry.url, requestInit);
+            console.log('Replay response status:', response.status);
+            return response;
+        },
+        
+        listRequestsWithAuth(headerName = 'Authorization') {
+            const log = getRequestLogSnapshot();
+            return log
+                .map((entry, index) => ({ entry, index }))
+                .filter(item => item.entry.headers && item.entry.headers[headerName])
+                .map(item => ({
+                    index: item.index,
+                    method: item.entry.method,
+                    url: item.entry.url,
+                    headerValue: item.entry.headers[headerName]
+                }));
+        }
+    };
+    
+    window.jwtLab = jwtLab;
+    
     console.log('✅ JWT Token Inspector loaded!');
-    console.log('Commands: findJWTTokens(), decodeJWT(token), findAuthHeaders()');
+    console.log('Commands: findJWTTokens(), decodeJWT(token), jwtLab.forgeNoneVariant(token, overrides), jwtLab.modifyClaims(token, claims), jwtLab.replayRequestWithToken(index, token)');
 })();

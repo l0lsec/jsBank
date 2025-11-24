@@ -48,6 +48,10 @@ pentestHelp()  // Display command reference
 - `findDataAttributes()` - Find all data-* attributes
 - `findEventListeners()` - Find all event listeners on the page
 
+#### Sensitive Data Discovery
+- `scanSensitiveData()` - Scan DOM, storage, and logs for potential secrets
+- `scanSensitiveData({ customPatterns })` - Add custom regex signatures to the scanner
+
 ### 🎯 XSS TESTING
 
 - `testXSSInputs()` - Test all input fields with XSS payloads
@@ -63,16 +67,28 @@ pentestHelp()  // Display command reference
 - `inspectCookies()` - Analyze cookie security and detect session tokens
 - `testCookieManipulation(name, value)` - Test cookie manipulation
 
+#### CSRF Analysis
+- `analyzeCSRFProtection()` - Score each form for CSRF defenses
+- `replayFormWithoutCSRF(index, options)` - Resubmit forms with tokens stripped/modified
+
 #### JWT Tokens
 - `findJWTTokens()` - Find and decode JWT tokens in storage and cookies
 - `decodeJWT(token)` - Decode a specific JWT token
 - `findAuthHeaders()` - Instructions for discovering authorization headers
+- `jwtLab.forgeNoneVariant(token, overrides)` - Build `alg:none` test tokens
+- `jwtLab.modifyClaims(token, claims)` - Tamper with payload claims
+- `jwtLab.replayRequestWithToken(logIndex, token, options)` - Replay captured requests with modified tokens
 
 ### 📊 MONITORING
 
 - `showRequestLog()` - View all intercepted fetch/XHR requests
 - `showFormLog()` - View all form submissions
 - `clearLogs()` - Clear request and form logs
+- `showRealtimeLog()` - Inspect WebSocket/EventSource traffic
+- `listRealtimeChannels()` - List active realtime channels with IDs
+- `injectWebSocketMessage(id, payload)` - Send custom frames into a captured WebSocket
+- `closeRealtimeChannel(id, code, reason)` - Close a WebSocket/EventSource cleanly
+- `clearRealtimeLog()` - Clear realtime channel logs
 
 ## 💡 Usage Examples
 
@@ -140,6 +156,47 @@ showRequestLog()
 showRequestLog()
 ```
 
+### CSRF Validation
+```javascript
+// Score all forms for CSRF defenses
+analyzeCSRFProtection()
+
+// Replay the first form without its token to test enforcement
+await replayFormWithoutCSRF(0)
+```
+
+### Realtime Channel Testing
+```javascript
+// Watch WebSocket/EventSource traffic live
+listRealtimeChannels()
+showRealtimeLog()
+
+// Inject a custom payload into a captured WebSocket (use returned ID)
+injectWebSocketMessage('ws-1', JSON.stringify({ op: 'ping' }))
+```
+
+### Sensitive Data Sweep
+```javascript
+// Run default signatures
+scanSensitiveData()
+
+// Add custom regex patterns
+scanSensitiveData({
+    customPatterns: [
+        { name: 'Internal Project Code', regex: /PRJ-[0-9]{4}/g, severity: 'info' }
+    ]
+})
+```
+
+### JWT Tampering
+```javascript
+const tokens = findJWTTokens()
+const forged = jwtLab.forgeNoneVariant(tokens[0].token, { role: 'admin' })
+
+// Replay the first captured request with the forged token
+await jwtLab.replayRequestWithToken(0, forged)
+```
+
 ## 🔧 Features
 
 ### Automatic Request Interception
@@ -172,6 +229,26 @@ Advanced GraphQL testing capabilities:
 - Detects authentication cookies
 - Shows cookie details and security flags
 - Provides recommendations for secure cookie usage
+
+### Realtime Channel Monitoring
+- Hooks WebSocket and EventSource traffic
+- Provides channel IDs for injection/closure
+- Logs inbound/outbound frames for auditing
+
+### CSRF Auditor & Replay Helper
+- Scores forms for CSRF indicators (tokens, methods, origin)
+- Replays original submissions with tokens removed/overridden
+- Highlights forms that need server-side review
+
+### Sensitive Data Scanner
+- Sweeps DOM text, inline scripts, storage, and captured requests
+- Built-in signatures for API keys, JWTs, bearer tokens, emails, private IPs
+- Accepts custom regex patterns for environment-specific secrets
+
+### JWT Tampering Lab
+- Generates `alg:none` variants automatically
+- Modifies claims (roles, expiration, etc.) without re-copying boilerplate
+- Replays captured requests with forged tokens straight from the log
 
 ## 📦 Module Structure
 
@@ -349,6 +426,30 @@ testXSSInputs()
 
 // 4. Check for reflected parameters
 // (Review console output for reflections)
+```
+
+### CSRF Enforcement Testing
+```javascript
+// 1. Enumerate forms and score protections
+analyzeCSRFProtection()
+
+// 2. Replay interesting forms without/with modified tokens
+await replayFormWithoutCSRF(2, { overrides: { amount: '9999' } })
+
+// 3. Review server-side behavior and log results
+showRequestLog({ urlIncludes: '/transfer' })
+```
+
+### JWT Authorization Drift
+```javascript
+// 1. Capture some authenticated traffic
+showRequestLog()
+
+// 2. Forge a token that elevates privileges
+const forged = jwtLab.modifyClaims(existingToken, { role: 'super-admin' })
+
+// 3. Replay the captured request with the new token
+await jwtLab.replayRequestWithToken(3, forged)
 ```
 
 ---
