@@ -73,6 +73,7 @@ pentestHelp()  // Display command reference
 
 #### JWT Tokens
 - `findJWTTokens()` - Find and decode JWT tokens in storage, cookies, and JSON objects (searches for accessToken, idToken, refreshToken, and more)
+- `findMSALTokens()` - Find Microsoft MSAL (Microsoft Authentication Library) tokens, accounts, and credentials
 - `decodeJWT(token)` - Decode a specific JWT token
 - `findAuthHeaders()` - Instructions for discovering authorization headers
 - `jwtLab.forgeNoneVariant(token, overrides)` - Build `alg:none` test tokens
@@ -105,6 +106,9 @@ checkSecurityHeaders()
 
 // Find JWT tokens
 findJWTTokens()
+
+// Find Microsoft MSAL tokens
+findMSALTokens()
 ```
 
 ### XSS Testing
@@ -202,6 +206,27 @@ const forged = jwtLab.forgeNoneVariant(tokens[0].token, { role: 'admin' })
 await jwtLab.replayRequestWithToken(0, forged)
 ```
 
+### MSAL Token Discovery
+```javascript
+// Find all Microsoft Authentication Library (MSAL) tokens
+// Detects: MSAL accounts, access tokens, ID tokens, refresh tokens
+// Searches localStorage and sessionStorage for MSAL-specific keys
+const msalData = findMSALTokens()
+
+// Returns structured data:
+// - accounts: MSAL account objects
+// - accessTokens: Access tokens with decoded JWTs
+// - idTokens: ID tokens with decoded JWTs  
+// - refreshTokens: Refresh token credentials
+// - decodedTokens: All discovered JWTs with full details
+
+// Access specific token types
+console.log(msalData.accounts)       // User accounts
+console.log(msalData.accessTokens)   // Access tokens
+console.log(msalData.idTokens)       // ID tokens
+console.log(msalData.decodedTokens)  // All JWTs found
+```
+
 ## 🔧 Features
 
 ### Automatic Request Interception
@@ -254,6 +279,13 @@ Advanced GraphQL testing capabilities:
 - Generates `alg:none` variants automatically
 - Modifies claims (roles, expiration, etc.) without re-copying boilerplate
 - Replays captured requests with forged tokens straight from the log
+
+### MSAL Token Discovery
+- Automatically detects Microsoft Authentication Library (MSAL) storage patterns
+- Identifies MSAL accounts, access tokens, ID tokens, and refresh tokens
+- Searches for keys containing 'msal', 'login.windows.net', or 'login.microsoftonline.com'
+- Extracts and decodes JWTs from MSAL credential objects
+- Provides structured output with token types and account information
 
 ## 📦 Module Structure
 
@@ -347,6 +379,42 @@ Found potential JWT in localStorage["auth_token"]
   ✅ Token is still valid
 ```
 
+### MSAL Token Discovery
+```
+🔐 MSAL Token Discovery
+
+📦 Checking localStorage for MSAL data...
+Found MSAL key: d2fb3cf0-bb11-4a9f-8ee0-5014b70b21ab.4aaa468e-93ba-4ee3-ab9f-6a247aa3ade0-login.windows.net-accesstoken-...
+  └─ Contains JWT in 'secret' field
+Found MSAL key: msal.account.keys
+Found MSAL key: msal.token.keys.{clientId}
+
+═══════════════════════════════════════════
+📊 MSAL DISCOVERY SUMMARY
+═══════════════════════════════════════════
+
+🔑 Accounts: 2
+🎫 Access Tokens: 3
+🆔 ID Tokens: 2
+🔄 Refresh Tokens: 1
+📋 Other MSAL Keys: 5
+
+🎯 Total JWTs Found: 5
+
+📊 Decoded JWT Tokens:
+Token 1 [Access Token] from localStorage (MSAL)["..."].secret
+  Header: { typ: "JWT", alg: "RS256", kid: "..." }
+  Payload: { aud: "...", iss: "https://sts.windows.net/...", ... }
+  ⏰ Expiration: 11/25/2025, 3:30:00 PM
+  ✅ Token is still valid
+
+👤 MSAL Accounts:
+Account 1: user@example.com
+  homeAccountId: d2fb3cf0-bb11-4a9f-8ee0-5014b70b21ab
+  username: user@example.com
+  name: John Doe
+```
+
 ### API Endpoint Discovery
 ```
 🌐 Complete URL & Endpoint Discovery
@@ -391,6 +459,7 @@ checkSecurityHeaders()
 
 // 3. Authentication analysis
 findJWTTokens()
+findMSALTokens()  // For Microsoft-authenticated apps
 inspectCookies()
 
 // 4. Form analysis
@@ -455,6 +524,41 @@ const forged = jwtLab.modifyClaims(existingToken, { role: 'super-admin' })
 
 // 3. Replay the captured request with the new token
 await jwtLab.replayRequestWithToken(3, forged)
+```
+
+### Microsoft Azure/MSAL Application Testing
+```javascript
+// 1. Discover all MSAL tokens and accounts
+const msalData = findMSALTokens()
+
+// 2. View account information
+console.table(msalData.accounts)
+
+// 3. Extract and decode access tokens
+msalData.accessTokens.forEach(token => {
+    console.log('Access Token:', token.key)
+    if (token.data.secret) {
+        decodeJWT(token.data.secret)
+    }
+})
+
+// 4. Check ID tokens
+msalData.idTokens.forEach(token => {
+    console.log('ID Token:', token.key)
+    if (token.data.secret) {
+        decodeJWT(token.data.secret)
+    }
+})
+
+// 5. Test with modified tokens (combine with JWT tampering)
+const msalTokens = findMSALTokens()
+if (msalTokens.decodedTokens.length > 0) {
+    const forged = jwtLab.modifyClaims(
+        msalTokens.decodedTokens[0].token, 
+        { roles: ['Admin'] }
+    )
+    await jwtLab.replayRequestWithToken(0, forged)
+}
 ```
 
 ---
