@@ -72,7 +72,7 @@ pentestHelp()  // Display command reference
 - `replayFormWithoutCSRF(index, options)` - Resubmit forms with tokens stripped/modified
 
 #### JWT Tokens
-- `findJWTTokens()` - Find and decode JWT tokens in storage and cookies
+- `findJWTTokens()` - Find and decode JWT tokens in storage, cookies, and JSON objects (searches for accessToken, idToken, refreshToken, and more)
 - `decodeJWT(token)` - Decode a specific JWT token
 - `findAuthHeaders()` - Instructions for discovering authorization headers
 - `jwtLab.forgeNoneVariant(token, overrides)` - Build `alg:none` test tokens
@@ -190,7 +190,12 @@ scanSensitiveData({
 
 ### JWT Tampering
 ```javascript
+// Finds JWTs in storage, cookies, and nested JSON objects
+// Automatically searches for: accessToken, idToken, refreshToken, 
+// access_token, id_token, refresh_token, token, jwt, secret, etc.
 const tokens = findJWTTokens()
+
+// Example output shows location: sessionStorage["AuthUser"].idToken
 const forged = jwtLab.forgeNoneVariant(tokens[0].token, { role: 'admin' })
 
 // Replay the first captured request with the forged token
