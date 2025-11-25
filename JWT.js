@@ -229,6 +229,204 @@
     };
     
     /**
+     * Find MSAL (Microsoft Authentication Library) tokens and keys
+     */
+    window.findMSALTokens = function() {
+        console.group('🔐 MSAL Token Discovery');
+        
+        const msalData = {
+            accounts: [],
+            accessTokens: [],
+            idTokens: [],
+            refreshTokens: [],
+            otherKeys: []
+        };
+        
+        const allTokens = [];
+        
+        // Check localStorage for MSAL keys
+        console.log('\n📦 Checking localStorage for MSAL data...');
+        for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            
+            // MSAL keys typically start with client ID or contain 'msal', 'login.windows.net', etc.
+            if (key.toLowerCase().includes('msal') || 
+                key.includes('login.windows.net') || 
+                key.includes('login.microsoftonline.com') ||
+                key.match(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/i)) {
+                
+                const value = localStorage.getItem(key);
+                console.log(`Found MSAL key: ${key}`);
+                
+                try {
+                    const parsed = JSON.parse(value);
+                    
+                    // Check for account information
+                    if (key.toLowerCase().includes('account') || parsed.homeAccountId) {
+                        msalData.accounts.push({ key, data: parsed });
+                    }
+                    
+                    // Check for access tokens
+                    if (key.toLowerCase().includes('accesstoken') || parsed.credentialType === 'AccessToken') {
+                        msalData.accessTokens.push({ key, data: parsed });
+                        if (parsed.secret && isJWT(parsed.secret)) {
+                            console.log(`  └─ Contains JWT in 'secret' field`);
+                            allTokens.push({
+                                source: 'localStorage (MSAL)',
+                                key: key,
+                                path: 'secret',
+                                token: parsed.secret,
+                                type: 'Access Token'
+                            });
+                        }
+                    }
+                    
+                    // Check for ID tokens
+                    if (key.toLowerCase().includes('idtoken') || parsed.credentialType === 'IdToken') {
+                        msalData.idTokens.push({ key, data: parsed });
+                        if (parsed.secret && isJWT(parsed.secret)) {
+                            console.log(`  └─ Contains JWT in 'secret' field`);
+                            allTokens.push({
+                                source: 'localStorage (MSAL)',
+                                key: key,
+                                path: 'secret',
+                                token: parsed.secret,
+                                type: 'ID Token'
+                            });
+                        }
+                    }
+                    
+                    // Check for refresh tokens
+                    if (key.toLowerCase().includes('refreshtoken') || parsed.credentialType === 'RefreshToken') {
+                        msalData.refreshTokens.push({ key, data: parsed });
+                        if (parsed.secret) {
+                            console.log(`  └─ Contains refresh token in 'secret' field`);
+                        }
+                    }
+                    
+                    // Recursively search for any JWTs in the object
+                    const foundTokens = findJWTsInObject(parsed, '', [], 'localStorage (MSAL)', key);
+                    foundTokens.forEach(token => {
+                        if (!allTokens.find(t => t.token === token.token)) {
+                            allTokens.push({ ...token, type: 'Unknown' });
+                        }
+                    });
+                    
+                    if (!key.toLowerCase().includes('accesstoken') && 
+                        !key.toLowerCase().includes('idtoken') && 
+                        !key.toLowerCase().includes('refreshtoken') &&
+                        !key.toLowerCase().includes('account')) {
+                        msalData.otherKeys.push({ key, data: parsed });
+                    }
+                    
+                } catch (e) {
+                    // Not JSON or parsing failed
+                    msalData.otherKeys.push({ key, data: value });
+                }
+            }
+        }
+        
+        // Check sessionStorage for MSAL keys
+        console.log('\n📦 Checking sessionStorage for MSAL data...');
+        for (let i = 0; i < sessionStorage.length; i++) {
+            const key = sessionStorage.key(i);
+            
+            if (key.toLowerCase().includes('msal') || 
+                key.includes('login.windows.net') || 
+                key.includes('login.microsoftonline.com') ||
+                key.match(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/i)) {
+                
+                const value = sessionStorage.getItem(key);
+                console.log(`Found MSAL key: ${key}`);
+                
+                try {
+                    const parsed = JSON.parse(value);
+                    
+                    // Check for tokens and recursively search
+                    const foundTokens = findJWTsInObject(parsed, '', [], 'sessionStorage (MSAL)', key);
+                    foundTokens.forEach(token => {
+                        if (!allTokens.find(t => t.token === token.token)) {
+                            allTokens.push({ ...token, type: 'Unknown' });
+                        }
+                    });
+                    
+                } catch (e) {
+                    // Not JSON
+                }
+            }
+        }
+        
+        // Display summary
+        console.log('\n═══════════════════════════════════════════');
+        console.log('📊 MSAL DISCOVERY SUMMARY');
+        console.log('═══════════════════════════════════════════\n');
+        
+        console.log(`🔑 Accounts: ${msalData.accounts.length}`);
+        console.log(`🎫 Access Tokens: ${msalData.accessTokens.length}`);
+        console.log(`🆔 ID Tokens: ${msalData.idTokens.length}`);
+        console.log(`🔄 Refresh Tokens: ${msalData.refreshTokens.length}`);
+        console.log(`📋 Other MSAL Keys: ${msalData.otherKeys.length}`);
+        console.log(`\n🎯 Total JWTs Found: ${allTokens.length}\n`);
+        
+        // Display decoded tokens
+        if (allTokens.length > 0) {
+            console.log('📊 Decoded JWT Tokens:\n');
+            
+            allTokens.forEach((item, index) => {
+                const location = item.path 
+                    ? `${item.source}["${item.key}"].${item.path}`
+                    : `${item.source}["${item.key}"]`;
+                    
+                console.groupCollapsed(`Token ${index + 1} [${item.type}] from ${location}`);
+                
+                const decoded = decodeJWT(item.token);
+                if (decoded) {
+                    console.log('Header:', decoded.header);
+                    console.log('Payload:', decoded.payload);
+                    console.log('Signature:', decoded.signature);
+                    
+                    // Check expiration
+                    if (decoded.payload.exp) {
+                        const expDate = new Date(decoded.payload.exp * 1000);
+                        const now = new Date();
+                        console.log('\n⏰ Expiration:', expDate.toLocaleString());
+                        
+                        if (expDate < now) {
+                            console.warn('❌ Token is EXPIRED');
+                        } else {
+                            console.log('✅ Token is still valid');
+                        }
+                    }
+                }
+                
+                console.groupEnd();
+            });
+        }
+        
+        // Display account details
+        if (msalData.accounts.length > 0) {
+            console.log('\n👤 MSAL Accounts:\n');
+            msalData.accounts.forEach((account, index) => {
+                console.groupCollapsed(`Account ${index + 1}: ${account.data.username || account.data.name || 'Unknown'}`);
+                console.log('Key:', account.key);
+                console.log('Data:', account.data);
+                console.groupEnd();
+            });
+        }
+        
+        console.groupEnd();
+        
+        return {
+            accounts: msalData.accounts,
+            accessTokens: msalData.accessTokens,
+            idTokens: msalData.idTokens,
+            refreshTokens: msalData.refreshTokens,
+            otherKeys: msalData.otherKeys,
+            decodedTokens: allTokens
+        };
+    };
+    
+    /**
      * Find all authorization headers
      */
     window.findAuthHeaders = function() {
@@ -239,5 +437,5 @@
     };
     
     console.log('✅ JWT Token Inspector loaded!');
-    console.log('Commands: findJWTTokens(), decodeJWT(token), findAuthHeaders()');
+    console.log('Commands: findJWTTokens(), findMSALTokens(), decodeJWT(token), findAuthHeaders()');
 })();
